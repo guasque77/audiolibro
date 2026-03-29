@@ -292,41 +292,60 @@ async function loadPDF(file) {
 
     if (!allChunks.length) { toast('⚠️ Sin texto extraíble'); show('upload'); return; }
 
-    $('loadTitle').textContent = 'Analizando con Claude...';
-    $('loadSub').textContent = 'Detectando capítulos...';
+    $('loadTitle').textContent = 'Detectando capítulos...';
+    $('loadSub').textContent = '';
 
-    const preview = txt.substring(0, 4000);
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514', max_tokens: 600,
-        messages: [{ role: 'user', content: `Analiza este documento y responde SOLO con JSON (sin markdown, sin texto extra):
-{"titulo":"...","capitulos":[{"nombre":"...","buscar":"primeras 20 letras únicas de esa sección"}]}
-Máximo 8 secciones relevantes. Si no hay capítulos, pon inicio/parte media/final.
-Texto:\n${preview}` }]
-      })
+    // Local chapter detection — no API needed
+    const docTitle = file.name.replace(/\.pdf$/i, '');
+    const chapterPatterns = [
+      /^(cap[ií]tulo\s+[\dIVXLCivxlc]+[\s\.\-:]+.{0,60})/i,
+      /^(chapter\s+[\dIVXLCivxlc]+[\s\.\-:]+.{0,60})/i,
+      /^(parte\s+[\dIVXLCivxlc]+[\s\.\-:]+.{0,60})/i,
+      /^(part\s+[\dIVXLCivxlc]+[\s\.\-:]+.{0,60})/i,
+      /^(secci[oó]n\s+[\dIVXLCivxlc]+[\s\.\-:]+.{0,60})/i,
+      /^(introducci[oó]n|introduction|prefacio|preface|pr[oó]logo|prologue|foreword)/i,
+      /^(agradecimientos|acknowledgements|dedicatoria|dedication)/i,
+      /^(conclusi[oó]n|conclusions?|ep[ií]logo|epilogue|ap[eé]ndice|appendix)/i,
+      /^([\dIVXLCivxlc]{1,5}[\.\-\s]+[A-ZÁÉÍÓÚÑ][^.]{5,60}$)/,
+    ];
+
+    const detectedChapters = [];
+    allChunks.forEach((chunk, i) => {
+      const trimmed = chunk.trim();
+      for (const pat of chapterPatterns) {
+        const m = trimmed.match(pat);
+        if (m) {
+          const nombre = m[1] ? m[1].trim().substring(0, 60) : trimmed.substring(0, 60);
+          // Avoid duplicates too close together
+          const last = detectedChapters[detectedChapters.length - 1];
+          if (!last || i - last.si > 3) {
+            detectedChapters.push({ nombre, si: i });
+          }
+          break;
+        }
+      }
     });
-    const d = await r.json();
-    let analysis;
-    try {
-      analysis = JSON.parse((d.content?.[0]?.text || '').replace(/```json|```/g, '').trim());
-    } catch {
-      analysis = { titulo: file.name.replace(/\.pdf$/i, ''), capitulos: [{ nombre: 'Desde el inicio', buscar: '' }] };
+
+    // Always include start; add evenly-spaced fallbacks if few chapters found
+    if (detectedChapters.length === 0 || detectedChapters[0].si > 2) {
+      detectedChapters.unshift({ nombre: 'Inicio del documento', si: 0 });
+    }
+    if (detectedChapters.length < 3) {
+      const step = Math.floor(allChunks.length / 4);
+      [1, 2, 3].forEach(n => {
+        const si = step * n;
+        if (!detectedChapters.find(c => Math.abs(c.si - si) < 5)) {
+          detectedChapters.push({ nombre: 'Continuar (párrafo ' + (si + 1) + ')', si });
+        }
+      });
+      detectedChapters.sort((a, b) => a.si - b.si);
     }
 
-    chapters = analysis.capitulos.map((ch, i) => {
-      let si = 0;
-      if (ch.buscar && ch.buscar.length > 3) {
-        const f = allChunks.findIndex(s => s.toLowerCase().includes(ch.buscar.toLowerCase().substring(0, 18)));
-        si = f >= 0 ? f : Math.floor(i / analysis.capitulos.length * allChunks.length);
-      } else si = i === 0 ? 0 : Math.floor(i / analysis.capitulos.length * allChunks.length);
-      return { nombre: ch.nombre, si: i === 0 ? 0 : si };
-    });
+    chapters = detectedChapters.slice(0, 10);
 
-    $('docTitle').textContent = analysis.titulo || file.name.replace(/\.pdf$/i, '');
+    $('docTitle').textContent = docTitle;
     $('docMeta').textContent = allChunks.length + ' párrafos · ' + pdf.numPages + ' páginas';
-    $('playerTitle').textContent = analysis.titulo || file.name.replace(/\.pdf$/i, '');
+    $('playerTitle').textContent = docTitle;
     renderChapters();
     show('chap');
 
